@@ -17,13 +17,16 @@ import (
 // ==== Structures =====
 // =====================
 
+// The Client struct is one connected chat user
 type Client struct {
 	id     int32
 	name   string
 	stream pb.ChatService_ChatServer
-	err    chan error // buffered to avoid blocking
+	active bool
+	err    chan error
 }
 
+// ChatServiceServer implement of the gRPC ChatService
 type ChatServiceServer struct {
 	pb.UnimplementedChatServiceServer
 	mu      sync.Mutex
@@ -35,39 +38,48 @@ type ChatServiceServer struct {
 // ==== Core Logic =====
 // =====================
 
+// Chat() method handles the bidirectional stream with each client
 func (s *ChatServiceServer) Chat(stream pb.ChatService_ChatServer) error {
-	// First message must be JOIN
+	// Read first message from the client
 	msg, err := stream.Recv()
 	if err != nil {
 		log.Printf("[Server] Failed initial recv: %v", err)
 		return err
 	}
+
+	// Check if EventType is actually a JOIN request
 	if msg.Type != pb.EventType_JOIN {
 		log.Printf("[Server] First message from client %s was not JOIN (got %v)", msg.ClientName, msg.Type)
 		return fmt.Errorf("expected JOIN as first message")
 	}
 
 	s.mu.Lock()
+	// Check to ensure no duplicate clients
 	if _, exists := s.clients[msg.Id]; exists {
 		s.mu.Unlock()
 		log.Printf("[Server] Duplicate ID %d from client %s", msg.Id, msg.ClientName)
 		return fmt.Errorf("client ID already connected")
 	}
+
 	cleanName := strings.TrimSpace(msg.ClientName)
+
 	client := &Client{
 		id:     msg.Id,
 		name:   cleanName,
 		stream: stream,
+		active: true,
 		err:    make(chan error, 1),
 	}
 	s.clients[client.id] = client
 
+	// Lamport clock update
 	s.clock = max(s.clock, msg.Timestamp) + 1
 	joinLamport := s.clock
 	s.mu.Unlock()
 
 	log.Printf("[Server] JOIN: %s (ID=%d) at L=%d", client.name, client.id, joinLamport)
 
+	// Broadcast join message
 	s.broadcast(&pb.ServerMessage{
 		SenderId:   client.id,
 		SenderName: client.name,
@@ -76,66 +88,43 @@ func (s *ChatServiceServer) Chat(stream pb.ChatService_ChatServer) error {
 		Timestamp:  joinLamport,
 	})
 
-	// Receive loop for this client
+	// Start goroutine and receive messages from this client
 	go func() {
 		for {
 			msg, err := stream.Recv()
-
-			// Client closed stream (no LEAVE sent)
 			if err == io.EOF {
-				s.removeClient(client)
-
-				s.mu.Lock()
-				s.clock++ // internal event
-				currentLamport := s.clock
-				s.mu.Unlock()
-
-				s.broadcast(&pb.ServerMessage{
-					SenderId:   client.id,
-					SenderName: client.name,
-					MsgStream:  fmt.Sprintf("Participant %s disconnected", client.name),
-					Type:       pb.EventType_LEAVE,
-					Timestamp:  currentLamport,
-				})
-				select {
-				case client.err <- io.EOF:
-				default:
-				}
-				return
+				// client closed the connection
+				break
 			}
 			if err != nil {
-				select {
-				case client.err <- err:
-				default:
-				}
-				return
+				client.err <- err
+				break
 			}
 
-			// Explicit LEAVE
 			if msg.Type == pb.EventType_LEAVE {
-				s.removeClient(client)
-
 				s.mu.Lock()
 				s.clock = max(s.clock, msg.Timestamp) + 1
 				currentLamport := s.clock
 				s.mu.Unlock()
 
+				// Broadcast to everyone that this client left
 				s.broadcast(&pb.ServerMessage{
 					SenderId:   client.id,
 					SenderName: client.name,
-					MsgStream: fmt.Sprintf("Participant %s left Chit Chat at logical time L=%d",
-						client.name, currentLamport),
-					Type:      pb.EventType_LEAVE,
-					Timestamp: currentLamport,
+					MsgStream:  fmt.Sprintf("Participant %s left Chit Chat at logical time L=%d", client.name, currentLamport),
+					Type:       pb.EventType_LEAVE,
+					Timestamp:  currentLamport,
 				})
-				select {
-				case client.err <- io.EOF:
-				default:
-				}
+
+				// Remove from server list
+				s.removeClient(client)
+
+				// Notify the outer Chat() function to end cleanly
+				client.err <- io.EOF
 				return
 			}
 
-			// Normal message (enforce 128-char limit)
+			// Handle message size of max 128 characters
 			cleanMsg := strings.TrimSpace(msg.Msg)
 			if len(cleanMsg) > 128 {
 				s.mu.Lock()
@@ -143,7 +132,9 @@ func (s *ChatServiceServer) Chat(stream pb.ChatService_ChatServer) error {
 				currentLamport := s.clock
 				s.mu.Unlock()
 
-				// Notify only the sender
+				log.Printf("[Server] Rejecting oversize message from %s (len=%d) at L=%d", client.name, len(cleanMsg), currentLamport)
+
+				// Letting the sender know that their message was rejected if message too long
 				_ = client.stream.Send(&pb.ServerMessage{
 					SenderId:   0,
 					SenderName: "Server",
@@ -151,69 +142,76 @@ func (s *ChatServiceServer) Chat(stream pb.ChatService_ChatServer) error {
 					Type:       pb.EventType_MESSAGE,
 					Timestamp:  currentLamport,
 				})
+
 				continue
 			}
 
+			// Update Lamport clock
 			s.mu.Lock()
 			s.clock = max(s.clock, msg.Timestamp) + 1
 			currentLamport := s.clock
 			s.mu.Unlock()
 
-			log.Printf("[Server] Message from %s: %s (L=%d)", msg.ClientName, cleanMsg, currentLamport)
+			// Log and broadcast
+			log.Printf("[Server] Message from %s: %s (L=%d)", msg.ClientName, msg.Msg, currentLamport)
 
 			s.broadcast(&pb.ServerMessage{
 				SenderId:   client.id,
 				SenderName: client.name,
-				MsgStream:  cleanMsg,
+				MsgStream:  msg.Msg,
 				Type:       pb.EventType_MESSAGE,
 				Timestamp:  currentLamport,
 			})
 		}
+
+		// Handle client leaving
+		s.removeClient(client)
+		client.err <- io.EOF // Signal main Chat() to exit cleanly
 	}()
 
-	// Wait for this client’s goroutine to finish
+	// Block until this client's error channel receives something
 	return <-client.err
 }
 
-// =====================
-// ==== Broadcasting ===
-// =====================
-
+// Broadcast message to all connected clients
 func (s *ChatServiceServer) broadcast(msg *pb.ServerMessage) {
-	// Copy recipients under lock, then send without holding lock
 	s.mu.Lock()
-	recipients := make([]*Client, 0, len(s.clients))
-	for _, c := range s.clients {
-		recipients = append(recipients, c)
-	}
-	s.mu.Unlock()
+	defer s.mu.Unlock()
 
-	for _, cl := range recipients {
-		go func(cl *Client) {
-			if err := cl.stream.Send(msg); err != nil {
-				log.Printf("[Server] Error sending to %s: %v", cl.name, err)
-				// remove broken stream
-				s.mu.Lock()
-				delete(s.clients, cl.id)
-				s.mu.Unlock()
-			}
-		}(cl)
+	for _, c := range s.clients {
+		if c.active {
+			go func(cl *Client) {
+				if err := cl.stream.Send(msg); err != nil {
+					log.Printf("[Server] Error sending to %s: %v", cl.name, err)
+					cl.active = false
+				}
+			}(c)
+		}
 	}
 }
 
-// =====================
-// == Client teardown ==
-// =====================
-
+// Remove client and broadcast leave message
 func (s *ChatServiceServer) removeClient(client *Client) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.clock++
+	leaveLamport := s.clock
 	delete(s.clients, client.id)
-	s.mu.Unlock()
-	log.Printf("[Server] REMOVED: %s (ID=%d)", client.name, client.id)
+
+	log.Printf("[Server] LEAVE: %s (ID=%d) at L=%d", client.name, client.id, leaveLamport)
+
+	s.broadcast(&pb.ServerMessage{
+		SenderId:   client.id,
+		SenderName: client.name,
+		MsgStream:  fmt.Sprintf("%s left Chit Chat", client.name),
+		Type:       pb.EventType_LEAVE,
+		Timestamp:  leaveLamport,
+	})
 }
 
 // =====================
-// ======= Main ========
+// ==== Main Block =====
 // =====================
 
 func main() {
