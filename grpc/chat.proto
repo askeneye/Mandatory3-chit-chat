@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package itu.chitchat;
+
+option go_package = "Mandatory3_chitchat/grpc;proto";
+
+// =====================
+// === Enum Types ===
+// =====================
+
+enum EventType {
+  JOIN = 0;
+  MESSAGE = 1;
+  LEAVE = 2;
+}
+
+// =====================
+// === Message Types ===
+// =====================
+
+message Empty {}
+
+message JoinMsgLeave {
+  int32 id = 1;               // Unique client ID
+  string client_name = 2;     // Name client that is logging on message service
+  string log = 3;             // Log 
+  int64 timestamp = 4;        // Lamport timestamp
+  string msg = 5;             // Message to be sent through the message service
+  string join_request = 6;
+  string leave_request = 7;
+  EventType type = 8;         // Either "JOIN", "MESSAGE", or "LEAVE"
+}
+
+message ServerMessage {
+  int32 sender_id = 1;
+  string sender_name = 2;
+  string log = 3;             // Log 
+  string msg_stream = 4;      // Message content
+  EventType type = 5;         // Either "JOIN", "MESSAGE", or "LEAVE"  
+  int64 timestamp = 6;
+}
+
+// =====================
+// === Service Layer ===
+// =====================
+service ChatService {
+  rpc Chat(stream JoinMsgLeave) returns (stream ServerMessage);
+}
