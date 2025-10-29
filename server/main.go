@@ -31,7 +31,7 @@ type ChatServiceServer struct {
 	pb.UnimplementedChatServiceServer
 	mu      sync.Mutex
 	clients map[int32]*Client
-	clock   int64 // Lamport logical clock
+	clock   int64 // Lamport clock
 }
 
 // =====================
@@ -134,7 +134,7 @@ func (s *ChatServiceServer) Chat(stream pb.ChatService_ChatServer) error {
 
 				log.Printf("[Server] Rejecting oversize message from %s (len=%d) at L=%d", client.name, len(cleanMsg), currentLamport)
 
-				// Letting the sender know that their message was rejected
+				// Letting the sender know that their message was rejected if message too long
 				_ = client.stream.Send(&pb.ServerMessage{
 					SenderId:   0,
 					SenderName: "Server",
