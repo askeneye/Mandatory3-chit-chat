@@ -124,8 +124,8 @@ func (s *ChatServiceServer) Chat(stream pb.ChatService_ChatServer) error {
 				return
 			}
 
+			// Handle message size of max 128 characters
 			cleanMsg := strings.TrimSpace(msg.Msg)
-
 			if len(cleanMsg) > 128 {
 				s.mu.Lock()
 				s.clock = max(s.clock, msg.Timestamp) + 1

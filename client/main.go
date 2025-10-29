@@ -17,10 +17,10 @@ import (
 )
 
 func main() {
-	// For someone else to connect - We would have to replace localhost (below) with the server LAN IP address.
+	conn, err := grpc.Dial("localhost:50052", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// For someone else to connect we would have to replace localhost (above) with the server LAN IP address.
 	// We would still have to be on the same network for this to work.
 	// conn, err := grpc.Dial("10.26.58.14:50052", grpc.WithTransportCredentials(insecure.NewCredentials()))
-	conn, err := grpc.Dial("localhost:50052", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
