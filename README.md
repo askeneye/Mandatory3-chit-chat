@@ -59,24 +59,3 @@ Each join, message, and leave event is timestamped using a Lamport logical clock
 
 Formula:
    L = max(L_server, L_client) + 1
-
-
-
-----------------------------------------------------
-Example Output
-----------------------------------------------------
-
-Server:
-   [Server] Chit Chat service running on :50052
-   [Server] JOIN: Alex (ID=3300) at L=1
-   [Server] Message from Alex: Hello World! (L=2)
-   [Server] JOIN: Aske (ID=4800) at L=3
-   [Server] Message from Aske: Hello Alex (L=4)
-   [Server] LEAVE: Aske (ID=4800) at L=8
-
-Client:
-   Enter your name: Aske
-   Aske: Hello Alex
-   [Server @ L=4] Alex: Hello World!
-   Aske: exit
-   Leaving chat...
